@@ -18,7 +18,7 @@ Este proyecto muestra cómo construir un pipeline ETL simple pero completo utili
 - Google Cloud Storage
 - BigQuery
 - Python, Pandas
-- API pública: https://randomuser.me/
+- API pública: https://randomuser.me/api/
 
 ### 🧠 Ideal para:
 
