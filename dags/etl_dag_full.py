@@ -1,19 +1,21 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.providers.google.cloud.operators.bigquery import (
+    BigQueryInsertJobOperator,
+    BigQueryCreateEmptyTableOperator,
+)
 from airflow.providers.google.cloud.transfers.local_to_gcs import LocalFilesystemToGCSOperator
 import os
 import requests
 import pandas as pd
-from google.cloud import bigquery
-from google.api_core.exceptions import NotFound
 
 # Variables de entorno
 bucket = os.getenv("GCS_BUCKET_NAME")
 project_id = os.getenv("BIGQUERY_PROJECT_ID")
 dataset_id = os.getenv("BIGQUERY_DATASET_ID")
 table_id = os.getenv("BIGQUERY_TABLE_ID")
+gcp_conn_id = 'google_cloud_default'
 
 def fetch_customers(**context):
     records = []
@@ -35,26 +37,7 @@ def fetch_customers(**context):
     df.drop_duplicates(subset=["email"], inplace=True)
     df.to_csv(local_path, index=False)
 
-    # Guardar el nombre del archivo para las siguientes tareas
     context['ti'].xcom_push(key='csv_filename', value=filename)
-
-def check_and_create_bq_table():
-    client = bigquery.Client(project=project_id)
-    table_ref = client.dataset(dataset_id).table(table_id)
-
-    try:
-        client.get_table(table_ref)
-        print(f"✅ Table {table_id} already exists.")
-    except NotFound:
-        schema = [
-            bigquery.SchemaField("full_name", "STRING"),
-            bigquery.SchemaField("email", "STRING"),
-            bigquery.SchemaField("national_id", "STRING"),
-            bigquery.SchemaField("country", "STRING")
-        ]
-        table = bigquery.Table(table_ref, schema=schema)
-        client.create_table(table)
-        print(f"📦 Created table {table_id}.")
 
 default_args = {
     'owner': 'airflow',
@@ -78,11 +61,6 @@ with DAG(
         python_callable=fetch_customers
     )
 
-    check_create_table_task = PythonOperator(
-        task_id='check_and_create_bq_table',
-        python_callable=check_and_create_bq_table
-    )
-
     def upload_to_gcs(**context):
         filename = context['ti'].xcom_pull(key='csv_filename', task_ids='fetch_customers')
         local_path = f'/opt/airflow/data/{filename}'
@@ -94,12 +72,27 @@ with DAG(
             src=local_path,
             dst=destination_path,
             bucket=bucket,
-            gcp_conn_id='google_cloud_default'
+            gcp_conn_id=gcp_conn_id
         ).execute(context=context)
 
     upload_task = PythonOperator(
         task_id='upload_to_gcs',
         python_callable=upload_to_gcs
+    )
+
+    check_create_table_task = BigQueryCreateEmptyTableOperator(
+        task_id='check_and_create_bq_table',
+        project_id=project_id,
+        dataset_id=dataset_id,
+        table_id=table_id,
+        schema_fields=[
+            {"name": "full_name", "type": "STRING", "mode": "NULLABLE"},
+            {"name": "email", "type": "STRING", "mode": "NULLABLE"},
+            {"name": "national_id", "type": "STRING", "mode": "NULLABLE"},
+            {"name": "country", "type": "STRING", "mode": "NULLABLE"}
+        ],
+        exists_ok=True,
+        gcp_conn_id=gcp_conn_id
     )
 
     def load_to_bigquery(**context):
@@ -117,12 +110,12 @@ with DAG(
                     },
                     "sourceUris": [uri],
                     "sourceFormat": "CSV",
-                    "autodetect": True,
+                    "autodetect": False,
                     "skipLeadingRows": 1,
                     "writeDisposition": "WRITE_APPEND"
                 }
             },
-            gcp_conn_id='google_cloud_default'
+            gcp_conn_id=gcp_conn_id
         ).execute(context=context)
 
     bq_load_task = PythonOperator(
@@ -147,8 +140,8 @@ with DAG(
                 "useLegacySql": False
             }
         },
-        gcp_conn_id='google_cloud_default'
+        gcp_conn_id=gcp_conn_id
     )
 
-    # Definir las dependencias entre las tareas
-    fetch_task >> check_create_table_task >> upload_task >> bq_load_task >> dedupe_task
+    # ✅ ORDEN corregido:
+    fetch_task >> upload_task >> check_create_table_task >> bq_load_task >> dedupe_task
