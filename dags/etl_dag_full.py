@@ -15,10 +15,7 @@ project_id = os.getenv("BIGQUERY_PROJECT_ID")
 dataset_id = os.getenv("BIGQUERY_DATASET_ID")
 table_id = os.getenv("BIGQUERY_TABLE_ID")
 
-file_path = '/opt/airflow/data/customers.csv'
-
-# 1️⃣ Obtener datos y agregar al CSV local
-def fetch_customers():
+def fetch_customers(**context):
     records = []
     for _ in range(10):
         user = requests.get('https://randomuser.me/api/').json()['results'][0]
@@ -28,19 +25,19 @@ def fetch_customers():
             'national_id': user['id']['value'],
             'country': user['location']['country']
         })
-    df_new = pd.DataFrame(records)
+    df = pd.DataFrame(records)
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f'customers_{timestamp}.csv'
+    local_path = f'/opt/airflow/data/{filename}'
+
     os.makedirs('/opt/airflow/data', exist_ok=True)
+    df.drop_duplicates(subset=["email"], inplace=True)
+    df.to_csv(local_path, index=False)
 
-    if os.path.exists(file_path):
-        df_existing = pd.read_csv(file_path)
-        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-    else:
-        df_combined = df_new
+    # Guardar el nombre del archivo para las siguientes tareas
+    context['ti'].xcom_push(key='csv_filename', value=filename)
 
-    df_combined.drop_duplicates(subset=["email"], keep="last", inplace=True)
-    df_combined.to_csv(file_path, index=False)
-
-# 2️⃣ Crear la tabla si no existe
 def check_and_create_bq_table():
     client = bigquery.Client(project=project_id)
     table_ref = client.dataset(dataset_id).table(table_id)
@@ -59,7 +56,6 @@ def check_and_create_bq_table():
         client.create_table(table)
         print(f"📦 Created table {table_id}.")
 
-# Argumentos por defecto
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -68,58 +64,72 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-# DAG principal
 with DAG(
-    'customer_etl_pipeline',
+    'customer_etl_pipeline_v2',
     default_args=default_args,
-    description='ETL: fetch -> GCS -> BQ (append + dedupe)',
+    description='ETL: fetch -> GCS -> BQ (dedup antes de insertar)',
     schedule=timedelta(days=1),
     catchup=False,
     tags=['etl', 'gcs', 'bigquery']
 ) as dag:
 
-    # 1. Fetch data
     fetch_task = PythonOperator(
         task_id='fetch_customers',
         python_callable=fetch_customers
     )
 
-    # 2. Check/Create table
     check_create_table_task = PythonOperator(
         task_id='check_and_create_bq_table',
         python_callable=check_and_create_bq_table
     )
 
-    # 3. Upload CSV to GCS
-    upload_task = LocalFilesystemToGCSOperator(
+    def upload_to_gcs(**context):
+        filename = context['ti'].xcom_pull(key='csv_filename', task_ids='fetch_customers')
+        local_path = f'/opt/airflow/data/{filename}'
+        destination_path = f'customers/{filename}'
+        context['ti'].xcom_push(key='gcs_path', value=destination_path)
+
+        return LocalFilesystemToGCSOperator(
+            task_id='upload_to_gcs_internal',
+            src=local_path,
+            dst=destination_path,
+            bucket=bucket,
+            gcp_conn_id='google_cloud_default'
+        ).execute(context=context)
+
+    upload_task = PythonOperator(
         task_id='upload_to_gcs',
-        src=file_path,
-        dst='customers/customers.csv',
-        bucket=bucket,
-        gcp_conn_id='google_cloud_default'
+        python_callable=upload_to_gcs
     )
 
-    # 4. Load GCS CSV to BigQuery
-    bq_load_task = BigQueryInsertJobOperator(
+    def load_to_bigquery(**context):
+        gcs_path = context['ti'].xcom_pull(key='gcs_path', task_ids='upload_to_gcs')
+        uri = f'gs://{bucket}/{gcs_path}'
+
+        return BigQueryInsertJobOperator(
+            task_id='bq_load_internal',
+            configuration={
+                "load": {
+                    "destinationTable": {
+                        "projectId": project_id,
+                        "datasetId": dataset_id,
+                        "tableId": table_id
+                    },
+                    "sourceUris": [uri],
+                    "sourceFormat": "CSV",
+                    "autodetect": True,
+                    "skipLeadingRows": 1,
+                    "writeDisposition": "WRITE_APPEND"
+                }
+            },
+            gcp_conn_id='google_cloud_default'
+        ).execute(context=context)
+
+    bq_load_task = PythonOperator(
         task_id='load_to_bq',
-        configuration={
-            "load": {
-                "destinationTable": {
-                    "projectId": project_id,
-                    "datasetId": dataset_id,
-                    "tableId": table_id
-                },
-                "sourceUris": [f"gs://{bucket}/customers/customers.csv"],
-                "sourceFormat": "CSV",
-                "autodetect": True,
-                "skipLeadingRows": 1,
-                "writeDisposition": "WRITE_APPEND"
-            }
-        },
-        gcp_conn_id='google_cloud_default'
+        python_callable=load_to_bigquery
     )
 
-    # 5. Eliminar duplicados en BigQuery
     dedupe_task = BigQueryInsertJobOperator(
         task_id='remove_duplicates_bq',
         configuration={
@@ -128,7 +138,7 @@ with DAG(
                     CREATE OR REPLACE TABLE `{project_id}.{dataset_id}.{table_id}` AS
                     SELECT AS VALUE *
                     FROM (
-                        SELECT *,
+                        SELECT * EXCEPT(row_num),
                                ROW_NUMBER() OVER (PARTITION BY email ORDER BY CURRENT_TIMESTAMP()) AS row_num
                         FROM `{project_id}.{dataset_id}.{table_id}`
                     )
@@ -140,5 +150,5 @@ with DAG(
         gcp_conn_id='google_cloud_default'
     )
 
-    # DAG dependencies
+    # Definir las dependencias entre las tareas
     fetch_task >> check_create_table_task >> upload_task >> bq_load_task >> dedupe_task
