@@ -81,8 +81,10 @@ Antes de ejecutar los servicios, es necesario aplicar las migraciones de la base
 docker compose up airflow-init
 ```
 ### Dejar este parametro en False(opcional)
-Variable: AIRFLOW__CORE__LOAD_EXAMPLES(Archivo airflow.cfg)
-load_examples = False
+Variable: AIRFLOW__CORE__LOAD_EXAMPLES
+
+(Archivo airflow.cfg)
+load_examples = False (opcional)
 
 ### Paso 4: Ejecutar Airflow
 
