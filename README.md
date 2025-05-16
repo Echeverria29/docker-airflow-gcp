@@ -93,6 +93,9 @@ Ahora puedes iniciar todos los servicios necesarios:
 ```bash
 docker compose up
 ```
+### Antes de ejecutar esperar que todos los conetenedores esten en (healthy)
+STATUS Up 2 minutes (healthy)
+
 ## Acceso por defecto
 
 - **Usuario:** `airflow`  
