@@ -129,10 +129,10 @@ with DAG(
             "query": {
                 "query": f"""
                     CREATE OR REPLACE TABLE `{project_id}.{dataset_id}.{table_id}` AS
-                    SELECT AS VALUE *
+                    SELECT full_name, email, national_id, country
                     FROM (
-                        SELECT * EXCEPT(row_num),
-                               ROW_NUMBER() OVER (PARTITION BY email ORDER BY CURRENT_TIMESTAMP()) AS row_num
+                        SELECT *,
+                            ROW_NUMBER() OVER (PARTITION BY email ORDER BY CURRENT_TIMESTAMP()) AS row_num
                         FROM `{project_id}.{dataset_id}.{table_id}`
                     )
                     WHERE row_num = 1
@@ -140,8 +140,9 @@ with DAG(
                 "useLegacySql": False
             }
         },
-        gcp_conn_id=gcp_conn_id
+        gcp_conn_id='google_cloud_default'
     )
+
 
     # ✅ ORDEN corregido:
     fetch_task >> upload_task >> check_create_table_task >> bq_load_task >> dedupe_task
