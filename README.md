@@ -51,7 +51,7 @@ Este proyecto muestra cómo construir un pipeline ETL simple pero completo utili
 ### Paso 1: Clonar el repositorio
 
 ```bash
-git clone https://github.com/Echeverria29/airflow-docker-compose
+git clone https://github.com/Echeverria29/docker-airflow-gcp.git
 cd airflow-docker-compose
 ```
 ### Puedes desactivar los Dags de ejemplo
